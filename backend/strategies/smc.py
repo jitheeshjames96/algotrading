@@ -6,10 +6,20 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 class SMCEngine:
     @staticmethod
-    def apply_macro_trend(df: pd.DataFrame, ema_period: int = 200) -> pd.DataFrame:
-        """Calculates a high-performance EMA to act as a strict macro filter."""
+    def apply_macro_trend(df: pd.DataFrame, ema_period: int = 50) -> pd.DataFrame:
         df = df.copy()
-        df['ema_200'] = df['close'].ewm(span=ema_period, adjust=False).mean()
+        df['ema'] = df['close'].ewm(span=ema_period, adjust=False).mean()
+        return df
+
+    @staticmethod
+    def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+        """Calculates the Average True Range (ATR) to measure live market volatility."""
+        df = df.copy()
+        df['tr0'] = abs(df['high'] - df['low'])
+        df['tr1'] = abs(df['high'] - df['close'].shift(1))
+        df['tr2'] = abs(df['low'] - df['close'].shift(1))
+        df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+        df['atr'] = df['tr'].rolling(window=period).mean()
         return df
 
     @staticmethod
@@ -46,15 +56,16 @@ class SMCEngine:
 
     @staticmethod
     def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
-        """Combines SMC concepts WITH the Macro EMA Filter."""
         df = df.copy()
         df['active_bullish_fvg_top'] = df['bullish_fvg_top'].ffill()
         df['active_bullish_fvg_bottom'] = df['bullish_fvg_bottom'].ffill()
         
-        # STRICT ARCHITECT RULE: Only buy if above 200 EMA
+        df['is_green_candle'] = df['close'] > df['open']
+        
         df['long_signal'] = (df['market_trend'] == 1) & \
                             (df['low'] <= df['active_bullish_fvg_top']) & \
                             (df['close'] >= df['active_bullish_fvg_bottom']) & \
-                            (df['close'] > df['ema_200']) # <-- The Buffett Filter
+                            (df['close'] > df['ema']) & \
+                            (df['is_green_candle'] == True)
                             
         return df
