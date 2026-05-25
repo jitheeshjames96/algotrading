@@ -3,6 +3,7 @@ import logging
 import pandas as pd
 from datetime import datetime
 from data.historical_feed import fetch_nse_data
+from data.token_manager import ProductionTokenManager
 from strategies.smc import SMCEngine
 from execution.router import OptionsRouter
 from execution.risk_manager import RiskManager
@@ -18,15 +19,14 @@ class LiveTickEngine:
         self.config = ASSET_REGISTRY.get(asset_symbol)
         self.smc = SMCEngine()
         self.router = OptionsRouter()
+        self.token_manager = ProductionTokenManager() # Inject the Token Resolver microservice
         self.risk_manager = RiskManager(account_balance=100000.0, risk_per_trade_pct=0.02)
         self.broker = DhanBrokerClient()
-        self.db = SupabaseDatabaseManager() # Inject database engine connection
+        self.db = SupabaseDatabaseManager()
         
         self.data_buffer = pd.DataFrame()
         self.is_warmed_up = False
         self.last_executed_signal_idx = None 
-        
-        # Internal performance tracker tracking live state
         self.current_capital = 100000.00
         self.active_allocations = 0
 
@@ -81,13 +81,16 @@ class LiveTickEngine:
             logging.info("🚨 LIVE LONG SIGNAL DETECTED AT THE ACTIVE TICK")
             contract = self.router.generate_option_symbol(self.symbol, state['close'], "LONG", "24MAY")
             
+            # RESOLVE PRODUCTION EXCHANGE TOKEN ID ON THE FLY
+            resolved_token = self.token_manager.lookup_option_token(contract)
+            logging.info(f"🔍 Resolved Exchange Token ID for {contract} -> Token: {resolved_token}")
+            
             atr_buffer = state['atr'] * self.config["atr_multiplier"]
             sl = state['recent_swing_low'] - atr_buffer
             tp = max(state['recent_swing_high'], state['close'] + ((state['close'] - sl) * 1.5))
             
             plan = self.risk_manager.calculate_trade_parameters(state['close'], sl, tp)
             
-            # Commit entry fill alert directly into cloud database tables
             self.db.log_system_activity(
                 price=state['close'],
                 metric_state="SMC_SETUP_MATCH",
@@ -95,18 +98,16 @@ class LiveTickEngine:
                 contract=contract
             )
             
-            # Execute trade over the broker interface
-            self.broker.place_options_market_order(security_id="35000", symbol=contract, quantity=75, transaction_type="BUY")
+            # Execute trade over the broker interface passing real resolved exchange token strings
+            self.broker.place_options_market_order(security_id=resolved_token, symbol=contract, quantity=75, transaction_type="BUY")
             
-            # Adjust metric profiles and sync dashboard states downstream
             self.active_allocations += 1
             self.current_capital -= 1500.00
             self.db.update_snapshot_metrics(self.current_capital, 75.00, 7000.00, self.active_allocations, "SECURE")
             
             self.last_executed_signal_idx = current_candle_idx
         else:
-            logging.info(f" Harbored Ticks | Price: {state['close']:.2f} | Scanning data waves.")
-            # Record structural trend tracking lines into cloud logs
+            logging.info(f"📡 Harbored Ticks | Price: {state['close']:.2f} | Scanning data waves.")
             self.db.log_system_activity(
                 price=state['close'],
                 metric_state="SCANNING_CHOP",
