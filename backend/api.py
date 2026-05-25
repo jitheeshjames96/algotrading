@@ -1,14 +1,20 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import sys
 import os
 import uvicorn
+import json
+import asyncio
 import pandas as pd
-from execution.database_manager import SupabaseDatabaseManager
+from dotenv import load_dotenv
+from supabase import create_client
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data.historical_feed import fetch_nse_data
 from strategies.smc import SMCEngine
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv()
 
 app = FastAPI()
 
@@ -19,7 +25,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-db = SupabaseDatabaseManager()
+# Initialize Backend Client for API read operations
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase = create_client(supabase_url, supabase_key) if supabase_url and supabase_key else None
 
 @app.get("/api/chart-data")
 def get_chart_data():
@@ -34,7 +43,6 @@ def get_chart_data():
     df = smc.detect_fvg(df)
     df = smc.detect_structure(df)
     df = smc.generate_signals(df)
-    
     df = df.dropna(subset=['timestamp'])
     
     chart_data = []
@@ -59,40 +67,22 @@ def get_chart_data():
 
 @app.get("/api/live-state")
 def get_live_state():
-    """Fetches production audit paths and telemetry states straight from Supabase."""
-    if not db.client:
-        return {"metrics": {}, "logs": []}
+    """Queries the fresh real-time engine snapshots and execution data from Supabase."""
+    if not supabase:
+        return {"error": "Supabase client not initialized"}
         
     try:
-        # Fetch live analytics snapshot summary
-        metrics_res = db.client.table("metrics_snapshot").select("*").eq("id", 1).execute()
-        metrics = metrics_res.data[0] if metrics_res.data else {}
-        
-        # Fetch the last 10 algorithmic activity tracking trail logs ordered from newest to oldest
-        logs_res = db.client.table("execution_logs").select("*").order("timestamp", desc=True).limit(10).execute()
-        logs = logs_res.data if logs_res.data else []
+        # Fetch snapshot statistics row
+        metrics_res = supabase.table("metrics_snapshot").select("*").eq("id", 1).execute()
+        # Fetch trailing 10 audit execution logs sorted by latest time
+        logs_res = supabase.table("execution_logs").select("*").order("timestamp", desc=True).limit(10).execute()
         
         return {
-            "metrics": {
-                "capital": metrics.get("account_capital", 100000.00),
-                "winRate": metrics.get("win_rate", 0.00),
-                "netProfit": metrics.get("net_profit", 0.00),
-                "activeTrades": metrics.get("active_allocations", 0),
-                "safetyStatus": metrics.get("safety_state", "UNKNOWN")
-            },
-            "logs": [
-                {
-                    "timestamp": log.get("timestamp"),
-                    "price": log.get("asset_price", 0.0),
-                    "signal": log.get("metric_state", "SCANNING"),
-                    "contract": log.get("contract_targeted"),
-                    "details": log.get("action_details", "")
-                } for log in logs
-            ]
+            "metrics": metrics_res.data[0] if metrics_res.data else {},
+            "logs": logs_res.data if logs_res.data else []
         }
     except Exception as e:
-        print(f"API Fetch Error: {str(e)}")
-        return {"metrics": {}, "logs": []}
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
