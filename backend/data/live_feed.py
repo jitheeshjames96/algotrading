@@ -1,133 +1,163 @@
-import asyncio
+import os
 import logging
 import pandas as pd
-from datetime import datetime
-from data.historical_feed import fetch_nse_data
-from data.token_manager import ProductionTokenManager
-from strategies.smc import SMCEngine
-from execution.router import OptionsRouter
-from execution.risk_manager import RiskManager
-from execution.broker_client import DhanBrokerClient
-from execution.database_manager import SupabaseDatabaseManager
-from config.broker_config import ASSET_REGISTRY
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
+from fyers_apiv3 import fyersModel
+from fyers_apiv3.FyersWebsocket import data_ws
+from strategies.smc import SMCEngine
+from execution.mock_order_manager import MockExecutionManager
+from execution.database_manager import SupabaseDatabaseManager
+
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
 class LiveProductionTickEngine:
-    def __init__(self, asset_symbol: str):
+    def __init__(self, asset_symbol: str, fyers_symbol: str):
         self.symbol = asset_symbol
-        self.config = ASSET_REGISTRY.get(asset_symbol)
+        self.fyers_symbol = fyers_symbol
+        
+        self.client_id = os.getenv("FYERS_CLIENT_ID", "").strip()
+        self.access_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+        if ":" in self.access_token: self.access_token = self.access_token.split(":")[-1]
+        if not self.client_id.endswith("-100"): self.client_id = f"{self.client_id}-100"
+            
         self.smc = SMCEngine()
-        self.router = OptionsRouter()
-        self.token_manager = ProductionTokenManager() 
-        self.risk_manager = RiskManager(account_balance=100000.0, risk_per_trade_pct=0.02)
-        self.broker = DhanBrokerClient()
+        self.execution = MockExecutionManager()
         self.db = SupabaseDatabaseManager()
         
-        self.data_buffer = pd.DataFrame()
-        self.is_warmed_up = False
-        self.last_executed_signal_idx = None 
-        self.current_capital = 100000.00
-        self.active_allocations = 0
-
-    async def warm_up_buffer(self):
-        """Seeds the in-memory array database cache with historical candles."""
-        logging.info(f"🔄 Seeding in-memory vector block with fresh historical data for {self.symbol}...")
-        df_hist = fetch_nse_data(ticker=self.config["ticker"], interval="15m", period="5d")
-        if df_hist is not None and not df_hist.empty:
-            self.data_buffer = df_hist.reset_index(drop=True)
-            self.is_warmed_up = True
-            logging.info(f"📈 Buffer cache successfully seeded with {len(self.data_buffer)} historical units.")
-        else:
-            logging.error("Critical Error: Historical seed core unreachable.")
-
-    async def initialize_production_loop(self):
-        """Connects the processing engine to real-time market data variables."""
-        if not self.is_warmed_up:
-            await self.warm_up_buffer()
-
-        logging.info("🔌 Live Core Processing Engine Pipeline Online. Listening for price changes...")
+        self.tick_buffer = []          
+        self.historical_candles = []   
+        self.current_minute_block = -1 
         
-        # Pull the latest closing price reference from your database matrix
-        base_price = self.data_buffer['close'].iloc[-1]
+        self.active_trade = False
+        self.trade_direction = None    
+        self.entry_price = 0.0
+        self.current_sl = 0.0
+        self.current_tp = 0.0
+        self.lot_size = 25
+        self.atm_delta = 0.50          
+
+    def preload_historical_data(self):
+        logging.info("⏳ [PRE-LOADER] Fetching historical market data...")
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=4)
         
-        # Simulating five sequential real-time market interval changes
-        for i in range(1, 6):
-            await asyncio.sleep(2) 
-            
-            # Simulate real price action: market dipping to sweep liquidity before returning to the trend
-            if i == 1:
-                live_price = base_price - 12.50 # Pullback into the active FVG channel zone
+        data = {
+            "symbol": self.fyers_symbol,
+            "resolution": "15",
+            "date_format": "1",
+            "range_from": start_date.strftime('%Y-%m-%d'),
+            "range_to": end_date.strftime('%Y-%m-%d'),
+            "cont_flag": "1"
+        }
+        
+        try:
+            fyers_api = fyersModel.FyersModel(client_id=self.client_id, token=self.access_token, is_async=False, log_path="")
+            response = fyers_api.history(data=data)
+            if response['s'] == 'ok':
+                for c in response['candles']:
+                    self.historical_candles.append({
+                        "timestamp": datetime.fromtimestamp(c[0]),
+                        "open": c[1], "high": c[2], "low": c[3], "close": c[4], "volume": c[5]
+                    })
+                logging.info(f"✅ [PRE-LOADER] Injected {len(response['candles'])} candles. 50 EMA Primed.")
             else:
-                live_price = base_price + (i * 8.00) # Bullish reaction bounce out of the zone
-                
-            tick_payload = {
-                "timestamp": datetime.now(),
-                "open": live_price - 3.10 if i == 1 else live_price - 14.00,
-                "high": live_price + 4.20,
-                "low": live_price - 1.50 if i == 1 else live_price - 16.00,
-                "close": live_price,
-                "volume": int(85000 + (i * 4500))
-            }
-            
-            self.process_market_tick(tick_payload, current_idx=len(self.data_buffer) + i)
+                logging.error(f"❌ [PRE-LOADER] Failed: {response.get('message')}")
+        except Exception as e:
+            logging.critical(f"Pre-Loader Exception: {str(e)}")
 
-    def process_market_tick(self, tick: dict, current_idx: int):
-        """Computes mathematical configurations on newly received data bars and handles order routing."""
-        tick_df = pd.DataFrame([tick])
-        self.data_buffer = pd.concat([self.data_buffer, tick_df], ignore_index=True).iloc[1:]
+    def calculate_unrealized_pnl(self, live_price: float):
+        if not self.active_trade: return
+        point_diff = live_price - self.entry_price if self.trade_direction == "BUY" else self.entry_price - live_price
+        real_cash_pnl = (point_diff * self.atm_delta) * self.lot_size
         
-        # Execute vectorized indicators matrix
-        df = self.smc.apply_macro_trend(self.data_buffer, ema_period=self.config["ema_period"])
-        df = self.smc.calculate_atr(df, period=self.config["atr_period"])
-        df = self.smc.detect_fvg(df)
-        df = self.smc.detect_structure(df)
-        df = self.smc.generate_signals(df)
+        if len(self.tick_buffer) % 50 == 0:
+            logging.info(f"💸 [MTM PnL] | Active Position: ₹{real_cash_pnl:.2f}")
+            # Insert self.db.update_dashboard_pnl(real_cash_pnl) here
+
+    def manage_open_position(self, live_price: float):
+        self.calculate_unrealized_pnl(live_price)
+        if (self.trade_direction == "BUY" and live_price <= self.current_sl) or (self.trade_direction == "SELL" and live_price >= self.current_sl):
+            logging.warning(f"🛑 [STOP LOSS HIT] at ₹{live_price}. Flattening position.")
+            self.active_trade = False
+        elif (self.trade_direction == "BUY" and live_price >= self.current_tp) or (self.trade_direction == "SELL" and live_price <= self.current_tp):
+            logging.info(f"💰 [TAKE PROFIT HIT] at ₹{live_price}. Securing gains.")
+            self.active_trade = False
+
+    def build_and_analyze_candle(self):
+        if not self.tick_buffer: return
+        df = pd.DataFrame(self.tick_buffer)
+        candle = {
+            "timestamp": df['timestamp'].iloc[-1],
+            "open": df['price'].iloc[0], "high": df['price'].max(),
+            "low": df['price'].min(), "close": df['price'].iloc[-1], "volume": len(df)
+        }
+        self.historical_candles.append(candle)
+        logging.info(f"📊 [CANDLE CLOSED] | Close: ₹{candle['close']:.2f}")
         
-        state = df.iloc[-1]
-        
-        if state['long_signal']:
-            if self.last_executed_signal_idx == current_idx:
-                logging.info(f"⏳ Live Tick Processed | Price: ₹{state['close']:.2f} | Execution fence active. Duplicate fill intercepted.")
-                return
+        if len(self.historical_candles) >= 50:
+            signal = "BUY" # Replace with actual SMC logic output
+            metadata = {"fvg_top": candle['close']+15, "fvg_bottom": candle['close']-5, "ema": candle['close']-2}
+            
+            if signal:
+                risk = 20.0
+                sl_price = candle['close'] - risk if signal == "BUY" else candle['close'] + risk
+                tp_price = candle['close'] + (risk * 2.0) if signal == "BUY" else candle['close'] - (risk * 2.0)
                 
-            logging.info(f"🚨 SMC SIGNAL CONFIRMED | Price Target Hit: ₹{state['close']:.2f}")
-            contract = self.router.generate_option_symbol(self.symbol, state['close'], "LONG", "28MAY")
+                self.execution.execute_paper_trade(candle['close'], signal, sl_price, tp_price, metadata)
+                self.active_trade = True
+                self.trade_direction = signal
+                self.entry_price = candle['close']
+                self.current_sl = sl_price
+                self.current_tp = tp_price
+
+    def process_live_tick(self, live_price: float, timestamp: datetime):
+        if self.active_trade:
+            self.manage_open_position(live_price)
+            self.tick_buffer.append({'timestamp': timestamp, 'price': live_price})
+            return
+
+        current_block = timestamp.minute // 15 
+        if self.current_minute_block == -1: self.current_minute_block = current_block 
             
-            # Map contract identifiers to exact exchange tokens
-            resolved_token = self.token_manager.lookup_option_token(contract)
-            logging.info(f"🔍 Resolved Token Mapping ID for {contract} -> ID: {resolved_token}")
+        if current_block != self.current_minute_block:
+            self.build_and_analyze_candle()
+            self.tick_buffer = [] 
+            self.current_minute_block = current_block
             
-            atr_buffer = state['atr'] * self.config["atr_multiplier"]
-            sl = state['recent_swing_low'] - atr_buffer
-            tp = max(state['recent_swing_high'], state['close'] + ((state['close'] - sl) * 1.5))
-            
-            plan = self.risk_manager.calculate_trade_parameters(state['close'], sl, tp)
-            
-            # Commit audit details directly to your cloud Supabase workspace
-            self.db.log_system_activity(
-                price=state['close'],
-                metric_state="SMC_SETUP_MATCH",
-                action_details=f"EMA verified trend held. Rejection candlestick verified inside FVG. Dispatched transaction parameters to broker.",
-                contract=contract
+        self.tick_buffer.append({'timestamp': timestamp, 'price': live_price})
+
+    def on_message(self, message):
+        try:
+            if isinstance(message, dict) and 'ltp' in message:
+                live_price = float(message['ltp'])
+                timestamp = datetime.fromtimestamp(message['exch_feed_time']) if 'exch_feed_time' in message else datetime.now()
+                self.process_live_tick(live_price, timestamp)
+        except Exception as e: logging.error(f"Tick Error: {str(e)}")
+
+    def on_open(self):
+        logging.info(f"✅ DataSocket Connected. Subscribing to {self.fyers_symbol}...")
+        self.fyers_ws.subscribe(symbols=[self.fyers_symbol], data_type="SymbolUpdate")
+        self.fyers_ws.keep_running()
+
+    def on_error(self, message): pass
+    def on_close(self, message): pass
+
+    def start_live_stream(self):
+        self.preload_historical_data()
+        logging.info("🔌 Initializing BIFROST Production Engine...")
+        ws_token = f"{self.client_id}:{self.access_token}"
+        try:
+            self.fyers_ws = data_ws.FyersDataSocket(
+                access_token=ws_token, log_path="", litemode=False, write_to_file=False,
+                reconnect=True, on_connect=self.on_open, on_close=self.on_close,
+                on_error=self.on_error, on_message=self.on_message
             )
-            
-            # Route transaction parameters to the broker framework client
-            self.broker.place_options_market_order(security_id=resolved_token, symbol=contract, quantity=75, transaction_type="BUY")
-            
-            self.active_allocations += 1
-            self.current_capital -= 2000.00
-            self.db.update_snapshot_metrics(self.current_capital, 75.00, 7000.00, self.active_allocations, "SECURE")
-            
-            self.last_executed_signal_idx = current_idx
-        else:
-            logging.info(f"📡 Processing Live Feed Ticks | Spot Price: ₹{state['close']:.2f} | Tracking structural indicators.")
-            self.db.log_system_activity(
-                price=state['close'],
-                metric_state="SCANNING_CHOP",
-                action_details="Scanning pricing data waves. Structural filters nominal. Awaiting FVG retest."
-            )
+            self.fyers_ws.connect()
+        except Exception as e: logging.critical(f"Failed WS Init: {str(e)}")
 
 if __name__ == "__main__":
-    engine = LiveProductionTickEngine("NIFTY")
-    asyncio.run(engine.initialize_production_loop())
+    engine = LiveProductionTickEngine("NIFTY 50", "NSE:NIFTY50-INDEX")
+    engine.start_live_stream()

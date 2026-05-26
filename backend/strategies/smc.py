@@ -2,8 +2,6 @@ import pandas as pd
 import numpy as np
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-
 class SMCEngine:
     @staticmethod
     def apply_macro_trend(df: pd.DataFrame, ema_period: int = 50) -> pd.DataFrame:
@@ -13,22 +11,21 @@ class SMCEngine:
 
     @staticmethod
     def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-        """Calculates the Average True Range (ATR) to measure live market volatility."""
         df = df.copy()
-        df['tr0'] = abs(df['high'] - df['low'])
-        df['tr1'] = abs(df['high'] - df['close'].shift(1))
-        df['tr2'] = abs(df['low'] - df['close'].shift(1))
-        df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
-        df['atr'] = df['tr'].rolling(window=period).mean()
+        high = df['high']
+        low = df['low']
+        prev_close = df['close'].shift(1)
+        tr = pd.concat([high - low, abs(high - prev_close), abs(low - prev_close)], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(window=period).mean()
         return df
 
     @staticmethod
     def detect_fvg(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        df['bullish_fvg'] = df['low'] > df['high'].shift(2)
-        df['bearish_fvg'] = df['high'] < df['low'].shift(2)
-        df['bullish_fvg_top'] = np.where(df['bullish_fvg'], df['low'], np.nan)
-        df['bullish_fvg_bottom'] = np.where(df['bullish_fvg'], df['high'].shift(2), np.nan)
+        bullish_fvg = df['low'] > df['high'].shift(2)
+        bearish_fvg = df['high'] < df['low'].shift(2)
+        df['bullish_fvg_top'] = np.where(bullish_fvg, df['low'], np.nan)
+        df['bullish_fvg_bottom'] = np.where(bullish_fvg, df['high'].shift(2), np.nan)
         return df
 
     @staticmethod
@@ -41,17 +38,19 @@ class SMCEngine:
         
         is_sl = (df['low'].shift(c) < df['low'].shift(c+1)) & (df['low'].shift(c) < df['low'].shift(c+2)) & \
                 (df['low'].shift(c) < df['low'].shift(c-1)) & (df['low'].shift(c) < df['low'])
-                
-        df['swing_high_price'] = np.where(is_sh, df['high'].shift(c), np.nan)
-        df['swing_low_price'] = np.where(is_sl, df['low'].shift(c), np.nan)
-        df['recent_swing_high'] = df['swing_high_price'].ffill()
-        df['recent_swing_low'] = df['swing_low_price'].ffill()
+        
+        # FIXED: Wrap NumPy array in pd.Series before calling ffill()
+        df['recent_swing_high'] = pd.Series(np.where(is_sh, df['high'].shift(c), np.nan)).ffill().values
+        df['recent_swing_low'] = pd.Series(np.where(is_sl, df['low'].shift(c), np.nan)).ffill().values
         
         df['bullish_bos'] = (df['close'] > df['recent_swing_high']) & (df['close'].shift(1) <= df['recent_swing_high'].shift(1))
+        df['bullish_bos'] = df['bullish_bos'].fillna(False)
+        
         df['bearish_bos'] = (df['close'] < df['recent_swing_low']) & (df['close'].shift(1) >= df['recent_swing_low'].shift(1))
+        df['bearish_bos'] = df['bearish_bos'].fillna(False)
         
         df['market_trend'] = np.where(df['bullish_bos'], 1, np.where(df['bearish_bos'], -1, np.nan))
-        df['market_trend'] = df['market_trend'].ffill().fillna(0)
+        df['market_trend'] = pd.Series(df['market_trend']).ffill().fillna(0)
         return df
 
     @staticmethod
@@ -59,7 +58,6 @@ class SMCEngine:
         df = df.copy()
         df['active_bullish_fvg_top'] = df['bullish_fvg_top'].ffill()
         df['active_bullish_fvg_bottom'] = df['bullish_fvg_bottom'].ffill()
-        
         df['is_green_candle'] = df['close'] > df['open']
         
         df['long_signal'] = (df['market_trend'] == 1) & \
@@ -67,5 +65,4 @@ class SMCEngine:
                             (df['close'] >= df['active_bullish_fvg_bottom']) & \
                             (df['close'] > df['ema']) & \
                             (df['is_green_candle'] == True)
-                            
         return df

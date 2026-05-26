@@ -1,0 +1,5 @@
+{"level":"ERROR","location":"[__symbol_conversion:1334] data_ws","message":{"code":-300,"message":"Please provide valid token","s":"error","type":"sub"},"timestamp":"2026-05-26 09:33:21,308+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[__symbol_conversion:1334] data_ws","message":{"code":-300,"message":"Please provide valid token","s":"error","type":"sub"},"timestamp":"2026-05-26 09:36:02,184+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[__symbol_conversion:1334] data_ws","message":{"code":-300,"message":"Please provide valid token","s":"error","type":"sub"},"timestamp":"2026-05-26 11:04:52,794+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[__symbol_conversion:1334] data_ws","message":{"code":-300,"message":"Please provide valid token","s":"error","type":"sub"},"timestamp":"2026-05-26 11:15:42,929+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[__symbol_conversion:1334] data_ws","message":{"code":-300,"message":"Please provide valid token","s":"error","type":"sub"},"timestamp":"2026-05-26 11:17:41,314+0530","service":"FyersDataSocket"}

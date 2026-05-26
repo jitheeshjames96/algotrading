@@ -2,32 +2,31 @@ import yfinance as yf
 import pandas as pd
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-
-def fetch_nse_data(ticker="RELIANCE.NS", interval="15m", period="5d"):
-    """Fetches historical OHLCV data for NSE stocks."""
-    logging.info(f"Fetching {period} of {interval} data for {ticker}...")
-    
-    df = yf.download(ticker, period=period, interval=interval, progress=False)
-    
-    if df.empty:
-        logging.error(f"Failed to fetch data for {ticker}.")
+def fetch_nse_data(ticker="^NSEI", interval="15m", period="45d"):
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if df.empty: return None
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df.reset_index(inplace=True)
+        
+        # SCHEMA NORMALIZER: Find the Date column regardless of what yfinance calls it
+        date_candidates = ['date', 'datetime', 'index', 'timestamp']
+        for col in df.columns:
+            if col.lower() in date_candidates:
+                df.rename(columns={col: 'timestamp'}, inplace=True)
+                break
+        
+        df.columns = [c.lower() for c in df.columns]
+        
+        # Ensure 'timestamp' exists
+        if 'timestamp' not in df.columns:
+            logging.error(f"Mapping Failed. Available columns: {df.columns.tolist()}")
+            return None
+            
+        return df[['timestamp', 'open', 'high', 'low', 'close']]
+    except Exception as e:
+        logging.error(f"Data Feed Error: {str(e)}")
         return None
-        
-    df.reset_index(inplace=True)
-    
-    # yfinance sometimes returns multi-level columns in newer versions, let's flatten them if needed
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-        
-    # Standardize column names for our SMC engine
-    df.rename(columns={'Datetime': 'timestamp', 'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-    
-    # Ensure columns are lowercase just in case
-    df.columns = [col.lower() for col in df.columns]
-    
-    return df
-
-if __name__ == "__main__":
-    df = fetch_nse_data()
-    print(df.tail())
